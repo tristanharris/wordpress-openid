@@ -309,6 +309,7 @@ function openid_set_current_user($identity, $remember = true) {
  * @param string $identity_url OpenID to associate with the newly
  * created account
  * @param array $user_data array of user data
+ * @uses do_action() Calls 'openid_consumer_new_user_custom_data' hook action after creating user
  */
 function openid_create_new_user($identity_url, &$user_data) {
 	global $wpdb;
@@ -331,30 +332,37 @@ function openid_create_new_user($identity_url, &$user_data) {
 	$user_data['user_pass'] = substr( md5( uniqid( microtime() ) ), 0, 7);
 	$user_id = wp_insert_user( $user_data );
 
-	if( $user_id ) { // created ok
+	if ($user_id instanceof WP_Error) {
+		openid_message($user_id->get_error_message());
+		openid_status('error');
+		return;
+	} else if ( is_integer($user_id) ) { // created ok
 
 		$user_data['ID'] = $user_id;
 		// XXX this all looks redundant, see openid_set_current_user
 
 		$user = new WP_User( $user_id );
+		$credentials = array('user_login' => $user->user_login, 'user_password' => $user_data['user_pass'], 'remember' => true);
 
-		if( ! wp_login( $user->user_login, $user_data['user_pass'] ) ) {
-			openid_message(__('User was created fine, but wp_login() for the new user failed. This is probably a bug.', 'openid'));
+		if( ! wp_signon( $credentials ) ) {
+			openid_message(__('User was created fine, but wp_signon() for the new user failed. This is probably a bug.', 'openid'));
 			openid_status('error');
 			openid_error(openid_message());
 			return;
 		}
 
 		// notify of user creation
-		wp_new_user_notification( $user->user_login );
+		wp_new_user_notification( $user_id );
 
-		wp_clearcookie();
-		wp_setcookie( $user->user_login, md5($user->user_pass), true, '', '', true );
+		wp_clear_auth_cookie();
+		wp_set_auth_cookie($user_id, true);
 
 		// Bind the provided identity to the just-created user
 		openid_add_user_identity($user_id, $identity_url);
 
 		openid_status('redirect');
+
+		do_action('openid_consumer_new_user_custom_data', $user_id, $user_data);
 
 		if ( !$user->has_cap('edit_posts') ) $redirect_to = '/wp-admin/profile.php';
 
@@ -532,7 +540,8 @@ function openid_parse_request($wp) {
 				break;
 
 			case 'server':
-				openid_server_request($_REQUEST['action']);
+				$action = isset($_REQUEST['action']) ? $_REQUEST['action'] : null;
+				openid_server_request($action);
 				break;
 
 			case 'ajax':
@@ -586,7 +595,7 @@ function openid_clean_request() {
 		
 		$_SERVER['QUERY_STRING'] = implode('&', $clean);
 
-	} else if ($_SERVER['argc'] >= 1 && $_SERVER['argv'][0] == 'error=404') {
+	} else if (isset($_SERVER['argc']) && $_SERVER['argc'] >= 1 && $_SERVER['argv'][0] == 'error=404') {
 
 		// handle lighttpd hack which uses a custom error-handler, passing 404 errors to WordPress.  
 		// This results in the QUERY_STRING not having the correct information, but fortunately we 
